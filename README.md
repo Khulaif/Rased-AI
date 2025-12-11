@@ -12,7 +12,7 @@
 
 ---
 
-## 📖 Overview
+## Overview
 
 **Rased (راصد)** is an AI-powered fraud detection system designed for government service platforms like Absher. It uses LSTM neural networks and "Digital Twin" technology to learn each user's unique behavioral patterns and detect anomalies in real-time.
 
@@ -262,13 +262,13 @@ For production use:
 
 ---
 
-## 📜 License
+## License
 
 Proprietary - Saudi Government Services
 
 ---
 
-## 👥 Contact
+## Contact
 
 For support or questions:
 - Email: khliaf.alanize@gmail.com
