@@ -18,15 +18,15 @@
 
 ### Key Features
 
-- 🧠 **LSTM-Based Learning**: Predicts user behavior sequences with high accuracy
-- 👤 **Digital Twin Technology**: Creates unique behavioral fingerprints for each user
-- ⚡ **<200ms Latency**: Real-time processing with minimal impact on UX
-- 🔄 **Continuous Learning**: Improves from feedback (challenges passed/failed)
-- 🎯 **3-Tier Risk Classification**: Green (Allow), Yellow (Challenge), Red (Block)
+-  **LSTM-Based Learning**: Predicts user behavior sequences with high accuracy
+-  **Digital Twin Technology**: Creates unique behavioral fingerprints for each user
+-  **<200ms Latency**: Real-time processing with minimal impact on UX
+-  **Continuous Learning**: Improves from feedback (challenges passed/failed)
+-  **3-Tier Risk Classification**: Green (Allow), Yellow (Challenge), Red (Block)
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
@@ -46,7 +46,7 @@
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Install Dependencies
 
@@ -77,7 +77,7 @@ Access the API documentation at: http://localhost:8000/docs
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 Rased/
@@ -110,7 +110,7 @@ Rased/
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
 Edit `config/settings.py` to customize:
 
@@ -133,7 +133,7 @@ model_config = ModelConfig(
 
 ---
 
-## 📡 API Endpoints
+## API Endpoints
 
 ### Process Event
 ```http
@@ -185,7 +185,7 @@ GET /risk/{user_id}
 
 ---
 
-## 🎯 Detection Scenarios
+## Detection Scenarios
 
 ### 1. Normal Behavior (Green Zone)
 - User logs in from typical location
@@ -207,7 +207,7 @@ GET /risk/{user_id}
 
 ---
 
-## 🔄 Continuous Learning
+## Continuous Learning
 
 The system learns from every interaction:
 
@@ -219,7 +219,7 @@ Weekly model retraining incorporates all feedback.
 
 ---
 
-## 🛡️ Security Features
+## Security Features
 
 | Feature | Description |
 |---------|-------------|
@@ -231,7 +231,7 @@ Weekly model retraining incorporates all feedback.
 
 ---
 
-## 📊 Performance Targets
+## Performance Targets
 
 | Metric | Target | Actual |
 |--------|--------|--------|
@@ -242,7 +242,7 @@ Weekly model retraining incorporates all feedback.
 
 ---
 
-## 🚧 Production Deployment
+## Production Deployment
 
 For production use:
 
@@ -271,8 +271,7 @@ Proprietary - Saudi Government Services
 ## 👥 Contact
 
 For support or questions:
-- Email: security@absher.sa
-- SOC Hotline: Internal
+- Email: khliaf.alanize@gmail.com
 
 ---
 
