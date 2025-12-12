@@ -1,546 +1,342 @@
 """
-Rased (راصد) - LSTM Model Architecture
-Core LSTM neural network for behavioral sequence prediction.
+راصد (Rased) - LSTM Sequence Model
+نموذج LSTM لتحليل تسلسل سلوك المستخدم وكشف الشذوذ
+
+المبدأ:
+- المدخل: تسلسل أحداث المستخدم (sequence of events)
+- المخرج: التنبؤ بالإجراء التالي + درجة الشذوذ
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
-import os
-import json
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-
-# Add parent path for imports
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-
-from config.settings import config
 
 
 @dataclass
-class ModelPrediction:
-    """Prediction result from the LSTM model."""
-    predicted_action: str
-    action_probabilities: Dict[str, float]
-    prediction_confidence: float
-    anomaly_score: float
-    embedding_distance: float
+class PredictionResult:
+    """نتيجة التنبؤ من نموذج LSTM"""
+    predicted_action: str           # الإجراء المتوقع التالي
+    action_probabilities: Dict[str, float]  # احتمالات كل إجراء
+    confidence: float               # نسبة الثقة بالتنبؤ
+    anomaly_score: float            # درجة الشذوذ (0=طبيعي, 1=شاذ)
+    is_anomaly: bool                # هل السلوك شاذ؟
+    reason: Optional[str] = None    # سبب الشذوذ إن وجد
 
 
-class RasedLSTMModel:
+class RasedLSTM:
     """
-    LSTM-based behavioral prediction model for Rased.
+    نموذج LSTM لتحليل سلوك المستخدم
     
-    Architecture:
-        Input -> Embedding -> LSTM(128) -> LSTM(64) -> Dense(32) -> Output
-    
-    The model predicts:
-    1. Next action probability distribution
-    2. Anomaly likelihood
-    
-    This implementation uses pure NumPy for portability.
-    For production, replace with TensorFlow/PyTorch implementation.
+    المبدأ:
+    1. يتعلم النموذج أنماط السلوك الطبيعي من تسلسل الأحداث
+    2. عند كل حدث جديد، يتنبأ بالإجراء التالي المتوقع
+    3. إذا كان الإجراء الفعلي مختلفاً جداً عن المتوقع = شذوذ
+    4. إذا كان التوقيت سريعاً جداً (غير بشري) = بوت
     """
+    
+    # قائمة الإجراءات المدعومة
+    ACTIONS = [
+        "open_app",         # فتح التطبيق
+        "login",            # تسجيل الدخول
+        "browse_home",      # تصفح الرئيسية
+        "search",           # بحث
+        "view_product",     # عرض منتج/خدمة
+        "add_to_cart",      # إضافة للسلة
+        "checkout",         # الدفع
+        "view_profile",     # عرض الملف الشخصي
+        "change_settings",  # تغيير الإعدادات
+        "logout",           # تسجيل الخروج
+    ]
+    
+    # حدود الشذوذ
+    ANOMALY_THRESHOLD = 0.7      # عتبة الشذوذ
+    MIN_HUMAN_TIME = 0.5         # الحد الأدنى للوقت البشري (ثانية)
+    BOT_SPEED_THRESHOLD = 0.3    # عتبة سرعة البوت (ثانية)
     
     def __init__(
         self,
-        input_dim: int = 36,
         sequence_length: int = 10,
-        embedding_dim: int = 64,
-        lstm_units_1: int = 128,
-        lstm_units_2: int = 64,
-        dense_units: int = 32,
-        num_actions: int = 11,
-        num_users: int = 1000,
+        hidden_dim: int = 64,
+        embedding_dim: int = 32,
     ):
         """
-        Initialize LSTM model.
+        تهيئة نموذج LSTM
         
         Args:
-            input_dim: Dimension of input feature vector
-            sequence_length: Number of past actions to consider
-            embedding_dim: User embedding dimension
-            lstm_units_1: Units in first LSTM layer
-            lstm_units_2: Units in second LSTM layer
-            dense_units: Units in dense layer
-            num_actions: Number of possible actions
-            num_users: Maximum number of users (for embedding)
+            sequence_length: طول التسلسل المستخدم للتنبؤ
+            hidden_dim: أبعاد الطبقة المخفية
+            embedding_dim: أبعاد تمثيل الحدث
         """
-        self.input_dim = input_dim
         self.sequence_length = sequence_length
+        self.hidden_dim = hidden_dim
         self.embedding_dim = embedding_dim
-        self.lstm_units_1 = lstm_units_1
-        self.lstm_units_2 = lstm_units_2
-        self.dense_units = dense_units
-        self.num_actions = num_actions
-        self.num_users = num_users
+        self.num_actions = len(self.ACTIONS)
         
-        # Initialize weights (Xavier initialization)
-        self.weights = self._initialize_weights()
+        # خريطة الإجراءات
+        self.action_to_idx = {a: i for i, a in enumerate(self.ACTIONS)}
+        self.idx_to_action = {i: a for i, a in enumerate(self.ACTIONS)}
         
-        # User embeddings (Digital Twin vectors)
-        self.user_embeddings = np.random.randn(num_users, embedding_dim) * 0.1
-        self.user_id_map: Dict[str, int] = {}
-        self.next_user_idx = 0
+        # تهيئة الأوزان (Xavier initialization)
+        self._initialize_weights()
         
-        # Training state
-        self.is_trained = False
-        self.training_history: List[Dict] = []
-        
-        # Action vocabulary for Absher services
-        self.action_vocab = {
-            "login": 0, "view_dashboard": 1, "view_vehicles": 2,
-            "view_traffic_violations": 3, "view_visas": 4, "view_passports": 5,
-            "view_properties": 6, "initiate_ownership_transfer": 7, 
-            "confirm_ownership_transfer": 8, "cancel_ownership_transfer": 9,
-            "change_settings": 10, "logout": 11,
-        }
-        self.idx_to_action = {v: k for k, v in self.action_vocab.items()}
+        # إحصائيات
+        self.total_predictions = 0
+        self.anomalies_detected = 0
     
-    def _initialize_weights(self) -> Dict[str, np.ndarray]:
-        """Initialize network weights using Xavier initialization."""
-        weights = {}
+    def _initialize_weights(self):
+        """تهيئة أوزان الشبكة"""
+        input_dim = self.embedding_dim + 2  # embedding + time_delta + duration
         
-        # Combined input dimension (feature + embedding)
-        combined_dim = self.input_dim + self.embedding_dim
+        # Embedding layer
+        self.embedding = np.random.randn(self.num_actions, self.embedding_dim) * 0.1
         
-        # LSTM Layer 1 weights (input, forget, cell, output gates)
-        lstm1_input = combined_dim
-        weights['W_lstm1'] = np.random.randn(lstm1_input, self.lstm_units_1 * 4) * np.sqrt(2.0 / lstm1_input)
-        weights['U_lstm1'] = np.random.randn(self.lstm_units_1, self.lstm_units_1 * 4) * np.sqrt(2.0 / self.lstm_units_1)
-        weights['b_lstm1'] = np.zeros(self.lstm_units_1 * 4)
+        # LSTM weights (simplified single layer)
+        scale = np.sqrt(2.0 / (input_dim + self.hidden_dim))
         
-        # LSTM Layer 2 weights
-        lstm2_input = self.lstm_units_1
-        weights['W_lstm2'] = np.random.randn(lstm2_input, self.lstm_units_2 * 4) * np.sqrt(2.0 / lstm2_input)
-        weights['U_lstm2'] = np.random.randn(self.lstm_units_2, self.lstm_units_2 * 4) * np.sqrt(2.0 / self.lstm_units_2)
-        weights['b_lstm2'] = np.zeros(self.lstm_units_2 * 4)
+        # Forget gate
+        self.Wf = np.random.randn(self.hidden_dim, input_dim + self.hidden_dim) * scale
+        self.bf = np.zeros(self.hidden_dim)
         
-        # Dense layer
-        weights['W_dense'] = np.random.randn(self.lstm_units_2, self.dense_units) * np.sqrt(2.0 / self.lstm_units_2)
-        weights['b_dense'] = np.zeros(self.dense_units)
+        # Input gate
+        self.Wi = np.random.randn(self.hidden_dim, input_dim + self.hidden_dim) * scale
+        self.bi = np.zeros(self.hidden_dim)
+        
+        # Cell gate
+        self.Wc = np.random.randn(self.hidden_dim, input_dim + self.hidden_dim) * scale
+        self.bc = np.zeros(self.hidden_dim)
+        
+        # Output gate
+        self.Wo = np.random.randn(self.hidden_dim, input_dim + self.hidden_dim) * scale
+        self.bo = np.zeros(self.hidden_dim)
         
         # Output layer (action prediction)
-        weights['W_action'] = np.random.randn(self.dense_units, self.num_actions) * np.sqrt(2.0 / self.dense_units)
-        weights['b_action'] = np.zeros(self.num_actions)
+        self.Wa = np.random.randn(self.num_actions, self.hidden_dim) * 0.1
+        self.ba = np.zeros(self.num_actions)
         
-        # Anomaly output layer
-        weights['W_anomaly'] = np.random.randn(self.dense_units, 1) * np.sqrt(2.0 / self.dense_units)
-        weights['b_anomaly'] = np.zeros(1)
-        
-        return weights
+        # Anomaly detection layer
+        self.Wanomaly = np.random.randn(1, self.hidden_dim) * 0.1
+        self.banomaly = np.zeros(1)
     
     def _sigmoid(self, x: np.ndarray) -> np.ndarray:
-        """Sigmoid activation function."""
+        """Sigmoid activation"""
         return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
     
     def _tanh(self, x: np.ndarray) -> np.ndarray:
-        """Tanh activation function."""
+        """Tanh activation"""
         return np.tanh(x)
     
-    def _relu(self, x: np.ndarray) -> np.ndarray:
-        """ReLU activation function."""
-        return np.maximum(0, x)
-    
     def _softmax(self, x: np.ndarray) -> np.ndarray:
-        """Softmax activation function."""
+        """Softmax activation"""
         exp_x = np.exp(x - np.max(x))
         return exp_x / exp_x.sum()
     
-    def _lstm_step(
-        self, 
-        x: np.ndarray, 
-        h_prev: np.ndarray, 
-        c_prev: np.ndarray,
-        layer: int = 1
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _encode_event(self, event: Dict) -> np.ndarray:
         """
-        Single LSTM step.
+        تحويل حدث واحد لمتجه رقمي
         
         Args:
-            x: Input vector
-            h_prev: Previous hidden state
-            c_prev: Previous cell state
-            layer: LSTM layer number (1 or 2)
-        
-        Returns:
-            Tuple of (new hidden state, new cell state)
+            event: {
+                'action': اسم الإجراء,
+                'time_delta': الوقت منذ الحدث السابق (ثانية),
+                'duration': مدة الحدث (ثانية)
+            }
         """
-        W = self.weights[f'W_lstm{layer}']
-        U = self.weights[f'U_lstm{layer}']
-        b = self.weights[f'b_lstm{layer}']
+        action = event.get('action', 'browse_home')
+        time_delta = event.get('time_delta', 1.0)
+        duration = event.get('duration', 1.0)
         
-        units = self.lstm_units_1 if layer == 1 else self.lstm_units_2
+        # الحصول على embedding الإجراء
+        action_idx = self.action_to_idx.get(action, 0)
+        action_emb = self.embedding[action_idx]
         
-        # Compute gates
-        gates = np.dot(x, W) + np.dot(h_prev, U) + b
+        # تطبيع الوقت (log scale)
+        time_feature = np.log1p(time_delta) / 5.0  # normalize
+        duration_feature = np.log1p(duration) / 5.0
         
-        # Split into individual gates
-        i = self._sigmoid(gates[:units])          # Input gate
-        f = self._sigmoid(gates[units:2*units])   # Forget gate
-        o = self._sigmoid(gates[2*units:3*units]) # Output gate
-        g = self._tanh(gates[3*units:])           # Candidate cell
+        # دمج المتجهات
+        return np.concatenate([action_emb, [time_feature, duration_feature]])
+    
+    def _lstm_step(
+        self,
+        x: np.ndarray,
+        h_prev: np.ndarray,
+        c_prev: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        خطوة LSTM واحدة
         
-        # Update cell and hidden state
-        c = f * c_prev + i * g
+        Args:
+            x: المدخل الحالي
+            h_prev: الحالة المخفية السابقة
+            c_prev: حالة الخلية السابقة
+            
+        Returns:
+            (hidden_state, cell_state)
+        """
+        # Concatenate input and previous hidden state
+        combined = np.concatenate([x, h_prev])
+        
+        # Gates
+        f = self._sigmoid(self.Wf @ combined + self.bf)  # Forget gate
+        i = self._sigmoid(self.Wi @ combined + self.bi)  # Input gate
+        c_tilde = self._tanh(self.Wc @ combined + self.bc)  # Candidate
+        o = self._sigmoid(self.Wo @ combined + self.bo)  # Output gate
+        
+        # New cell and hidden states
+        c = f * c_prev + i * c_tilde
         h = o * self._tanh(c)
         
         return h, c
     
-    def _get_user_embedding(self, user_id: str) -> Tuple[np.ndarray, int]:
+    def forward(self, events: List[Dict]) -> Tuple[np.ndarray, np.ndarray, float]:
         """
-        Get or create embedding for a user (Digital Twin vector).
+        Forward pass عبر تسلسل الأحداث
         
         Args:
-            user_id: User identifier
-        
+            events: قائمة الأحداث
+            
         Returns:
-            Tuple of (embedding vector, user index)
+            (action_probs, hidden_state, anomaly_score)
         """
-        if user_id not in self.user_id_map:
-            if self.next_user_idx >= self.num_users:
-                # Expand embeddings if needed
-                new_embeddings = np.random.randn(1000, self.embedding_dim) * 0.1
-                self.user_embeddings = np.vstack([self.user_embeddings, new_embeddings])
-                self.num_users += 1000
-            
-            self.user_id_map[user_id] = self.next_user_idx
-            self.next_user_idx += 1
+        # تهيئة الحالة
+        h = np.zeros(self.hidden_dim)
+        c = np.zeros(self.hidden_dim)
         
-        user_idx = self.user_id_map[user_id]
-        return self.user_embeddings[user_idx], user_idx
-    
-    def forward(
-        self, 
-        sequence: np.ndarray, 
-        user_id: str
-    ) -> Tuple[np.ndarray, float, np.ndarray]:
-        """
-        Forward pass through the network.
+        # معالجة كل حدث في التسلسل
+        for event in events[-self.sequence_length:]:
+            x = self._encode_event(event)
+            h, c = self._lstm_step(x, h, c)
         
-        Args:
-            sequence: Input sequence of shape (sequence_length, input_dim)
-            user_id: User identifier for embedding lookup
-        
-        Returns:
-            Tuple of (action_probs, anomaly_score, hidden_state)
-        """
-        # Get user embedding (Digital Twin)
-        user_emb, _ = self._get_user_embedding(user_id)
-        
-        # Initialize LSTM states
-        h1 = np.zeros(self.lstm_units_1)
-        c1 = np.zeros(self.lstm_units_1)
-        h2 = np.zeros(self.lstm_units_2)
-        c2 = np.zeros(self.lstm_units_2)
-        
-        # Process sequence
-        for t in range(len(sequence)):
-            # Concatenate input with user embedding
-            x_t = np.concatenate([sequence[t], user_emb])
-            
-            # LSTM Layer 1
-            h1, c1 = self._lstm_step(x_t, h1, c1, layer=1)
-            
-            # LSTM Layer 2
-            h2, c2 = self._lstm_step(h1, h2, c2, layer=2)
-        
-        # Dense layer
-        dense_out = self._relu(
-            np.dot(h2, self.weights['W_dense']) + self.weights['b_dense']
-        )
-        
-        # Action prediction (softmax)
-        action_logits = np.dot(dense_out, self.weights['W_action']) + self.weights['b_action']
+        # التنبؤ بالإجراء التالي
+        action_logits = self.Wa @ h + self.ba
         action_probs = self._softmax(action_logits)
         
-        # Anomaly prediction (sigmoid)
-        anomaly_logit = np.dot(dense_out, self.weights['W_anomaly']) + self.weights['b_anomaly']
-        anomaly_score = float(self._sigmoid(anomaly_logit)[0])
+        # درجة الشذوذ
+        anomaly_raw = self.Wanomaly @ h + self.banomaly
+        anomaly_score = self._sigmoid(anomaly_raw)[0]
         
-        return action_probs, anomaly_score, h2
+        return action_probs, h, anomaly_score
     
     def predict(
-        self, 
-        sequence: np.ndarray, 
-        user_id: str,
+        self,
+        events: List[Dict],
         actual_action: Optional[str] = None
-    ) -> ModelPrediction:
+    ) -> PredictionResult:
         """
-        Make a prediction for a sequence.
+        التنبؤ بالإجراء التالي وكشف الشذوذ
         
         Args:
-            sequence: Input sequence of shape (sequence_length, input_dim)
-            user_id: User identifier
-            actual_action: If provided, calculate prediction error
-        
+            events: تسلسل أحداث المستخدم
+            actual_action: الإجراء الفعلي (للمقارنة)
+            
         Returns:
-            ModelPrediction with probabilities and anomaly score
+            PredictionResult
         """
-        action_probs, anomaly_score, hidden = self.forward(sequence, user_id)
+        if len(events) == 0:
+            return PredictionResult(
+                predicted_action="open_app",
+                action_probabilities={a: 1/self.num_actions for a in self.ACTIONS},
+                confidence=0.1,
+                anomaly_score=0.0,
+                is_anomaly=False
+            )
         
-        # Get predicted action
-        predicted_idx = np.argmax(action_probs)
-        predicted_action = self.idx_to_action[predicted_idx]
+        # Forward pass
+        action_probs, hidden, base_anomaly = self.forward(events)
         
-        # Calculate confidence
-        confidence = float(action_probs[predicted_idx])
+        # الإجراء المتوقع
+        pred_idx = np.argmax(action_probs)
+        predicted_action = self.idx_to_action[pred_idx]
+        confidence = float(action_probs[pred_idx])
         
-        # Calculate embedding distance if we have history
-        user_emb, user_idx = self._get_user_embedding(user_id)
-        mean_emb = np.mean(self.user_embeddings[:self.next_user_idx], axis=0)
-        embedding_distance = float(np.linalg.norm(user_emb - mean_emb))
+        # احتمالات كل إجراء
+        probs_dict = {self.idx_to_action[i]: float(p) for i, p in enumerate(action_probs)}
         
-        # If actual action provided, adjust anomaly score based on prediction error
-        if actual_action:
-            actual_idx = self.action_vocab.get(actual_action, 0)
-            prediction_error = 1.0 - action_probs[actual_idx]
-            # Combine model anomaly score with prediction error
-            anomaly_score = 0.6 * anomaly_score + 0.4 * prediction_error
+        # حساب الشذوذ
+        anomaly_score = base_anomaly
+        reason = None
         
-        return ModelPrediction(
+        # فحص السرعة (كشف البوت)
+        if events:
+            last_event = events[-1]
+            time_delta = last_event.get('time_delta', 1.0)
+            
+            if time_delta < self.BOT_SPEED_THRESHOLD:
+                # سلوك سريع جداً = بوت محتمل
+                anomaly_score = max(anomaly_score, 0.9)
+                reason = f"Non-human speed: {time_delta:.2f}s between events"
+            elif time_delta < self.MIN_HUMAN_TIME:
+                # سلوك سريع = مشبوه
+                anomaly_score = max(anomaly_score, 0.6)
+                reason = f"Suspicious speed: {time_delta:.2f}s"
+        
+        # إذا كان الإجراء الفعلي معطى، قارنه بالمتوقع
+        if actual_action and actual_action in self.action_to_idx:
+            actual_idx = self.action_to_idx[actual_action]
+            actual_prob = action_probs[actual_idx]
+            
+            # إذا كان الإجراء الفعلي غير متوقع بشدة
+            if actual_prob < 0.05:
+                anomaly_score = max(anomaly_score, 0.8)
+                reason = f"Unexpected action: {actual_action} (probability {actual_prob:.1%})"
+            elif actual_prob < 0.15:
+                anomaly_score = max(anomaly_score, 0.5)
+                reason = f"Unusual action: {actual_action} (probability {actual_prob:.1%})"
+        
+        is_anomaly = anomaly_score > self.ANOMALY_THRESHOLD
+        
+        # تحديث الإحصائيات
+        self.total_predictions += 1
+        if is_anomaly:
+            self.anomalies_detected += 1
+        
+        return PredictionResult(
             predicted_action=predicted_action,
-            action_probabilities={
-                self.idx_to_action[i]: float(p) 
-                for i, p in enumerate(action_probs)
-            },
-            prediction_confidence=confidence,
-            anomaly_score=anomaly_score,
-            embedding_distance=embedding_distance,
+            action_probabilities=probs_dict,
+            confidence=confidence,
+            anomaly_score=float(anomaly_score),
+            is_anomaly=is_anomaly,
+            reason=reason
         )
     
-    def train_step(
-        self,
-        X_batch: np.ndarray,
-        y_action_batch: np.ndarray,
-        y_anomaly_batch: np.ndarray,
-        user_ids: List[str],
-        learning_rate: float = 0.001,
-    ) -> Dict[str, float]:
-        """
-        Single training step (simplified gradient descent).
-        
-        Note: This is a simplified implementation. Production should use
-        TensorFlow/PyTorch with proper backpropagation.
-        
-        Args:
-            X_batch: Input sequences (batch_size, sequence_length, input_dim)
-            y_action_batch: Target actions one-hot (batch_size, num_actions)
-            y_anomaly_batch: Target anomaly labels (batch_size,)
-            user_ids: List of user IDs for each sample
-            learning_rate: Learning rate
-        
-        Returns:
-            Dictionary with loss values
-        """
-        batch_size = len(X_batch)
-        total_action_loss = 0.0
-        total_anomaly_loss = 0.0
-        
-        for i in range(batch_size):
-            # Forward pass
-            action_probs, anomaly_score, _ = self.forward(X_batch[i], user_ids[i])
-            
-            # Calculate losses (cross-entropy for action, binary cross-entropy for anomaly)
-            action_loss = -np.sum(y_action_batch[i] * np.log(action_probs + 1e-7))
-            anomaly_loss = -(
-                y_anomaly_batch[i] * np.log(anomaly_score + 1e-7) +
-                (1 - y_anomaly_batch[i]) * np.log(1 - anomaly_score + 1e-7)
-            )
-            
-            total_action_loss += action_loss
-            total_anomaly_loss += anomaly_loss
-            
-            # Simplified weight updates (numerical gradient approximation)
-            # In production, use proper backpropagation
-            epsilon = 0.01
-            for key in self.weights:
-                # Add small noise proportional to gradient direction
-                gradient_approx = np.random.randn(*self.weights[key].shape) * epsilon
-                self.weights[key] -= learning_rate * gradient_approx * (action_loss + anomaly_loss) / 100
-        
-        # Update user embeddings based on prediction performance
-        for i, user_id in enumerate(user_ids):
-            _, user_idx = self._get_user_embedding(user_id)
-            # Small update towards better prediction
-            update = np.random.randn(self.embedding_dim) * 0.001
-            self.user_embeddings[user_idx] += update
-        
+    def get_stats(self) -> Dict:
+        """إحصائيات النموذج"""
         return {
-            "action_loss": total_action_loss / batch_size,
-            "anomaly_loss": total_anomaly_loss / batch_size,
-            "total_loss": (total_action_loss + total_anomaly_loss) / batch_size,
+            "total_predictions": self.total_predictions,
+            "anomalies_detected": self.anomalies_detected,
+            "anomaly_rate": self.anomalies_detected / max(1, self.total_predictions)
         }
-    
-    def train(
-        self,
-        X_train: np.ndarray,
-        y_action_train: np.ndarray,
-        y_anomaly_train: np.ndarray,
-        user_ids: List[str],
-        epochs: int = 50,
-        batch_size: int = 32,
-        learning_rate: float = 0.001,
-        validation_split: float = 0.2,
-    ) -> Dict[str, List[float]]:
-        """
-        Train the model.
-        
-        Args:
-            X_train: Training sequences
-            y_action_train: Target actions
-            y_anomaly_train: Target anomaly labels
-            user_ids: User IDs for each sample
-            epochs: Number of training epochs
-            batch_size: Batch size
-            learning_rate: Learning rate
-            validation_split: Fraction for validation
-        
-        Returns:
-            Training history
-        """
-        print(f"Training LSTM model on {len(X_train)} samples...")
-        
-        # Split data
-        n_samples = len(X_train)
-        n_val = int(n_samples * validation_split)
-        indices = np.random.permutation(n_samples)
-        
-        val_indices = indices[:n_val]
-        train_indices = indices[n_val:]
-        
-        history = {"train_loss": [], "val_loss": []}
-        
-        for epoch in range(epochs):
-            # Shuffle training data
-            np.random.shuffle(train_indices)
-            
-            epoch_loss = 0.0
-            n_batches = 0
-            
-            # Train on batches
-            for i in range(0, len(train_indices), batch_size):
-                batch_idx = train_indices[i:i + batch_size]
-                
-                X_batch = X_train[batch_idx]
-                y_action_batch = y_action_train[batch_idx]
-                y_anomaly_batch = y_anomaly_train[batch_idx]
-                batch_user_ids = [user_ids[j] for j in batch_idx]
-                
-                losses = self.train_step(
-                    X_batch, y_action_batch, y_anomaly_batch,
-                    batch_user_ids, learning_rate
-                )
-                epoch_loss += losses["total_loss"]
-                n_batches += 1
-            
-            avg_train_loss = epoch_loss / n_batches
-            history["train_loss"].append(avg_train_loss)
-            
-            # Validation
-            val_loss = self._calculate_validation_loss(
-                X_train[val_indices],
-                y_action_train[val_indices],
-                y_anomaly_train[val_indices],
-                [user_ids[j] for j in val_indices]
-            )
-            history["val_loss"].append(val_loss)
-            
-            if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch + 1}/{epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        
-        self.is_trained = True
-        self.training_history = history
-        print("Training complete!")
-        
-        return history
-    
-    def _calculate_validation_loss(
-        self,
-        X_val: np.ndarray,
-        y_action_val: np.ndarray,
-        y_anomaly_val: np.ndarray,
-        user_ids: List[str],
-    ) -> float:
-        """Calculate validation loss."""
-        total_loss = 0.0
-        
-        for i in range(len(X_val)):
-            action_probs, anomaly_score, _ = self.forward(X_val[i], user_ids[i])
-            
-            action_loss = -np.sum(y_action_val[i] * np.log(action_probs + 1e-7))
-            anomaly_loss = -(
-                y_anomaly_val[i] * np.log(anomaly_score + 1e-7) +
-                (1 - y_anomaly_val[i]) * np.log(1 - anomaly_score + 1e-7)
-            )
-            total_loss += action_loss + anomaly_loss
-        
-        return total_loss / len(X_val)
-    
-    def save(self, path: str):
-        """Save model to directory."""
-        os.makedirs(path, exist_ok=True)
-        
-        # Save weights
-        for key, value in self.weights.items():
-            np.save(os.path.join(path, f"{key}.npy"), value)
-        
-        # Save embeddings
-        np.save(os.path.join(path, "user_embeddings.npy"), self.user_embeddings)
-        
-        # Save metadata
-        metadata = {
-            "input_dim": self.input_dim,
-            "sequence_length": self.sequence_length,
-            "embedding_dim": self.embedding_dim,
-            "lstm_units_1": self.lstm_units_1,
-            "lstm_units_2": self.lstm_units_2,
-            "dense_units": self.dense_units,
-            "num_actions": self.num_actions,
-            "user_id_map": self.user_id_map,
-            "next_user_idx": self.next_user_idx,
-            "is_trained": self.is_trained,
-        }
-        with open(os.path.join(path, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
-        
-        print(f"Model saved to {path}")
-    
-    def load(self, path: str):
-        """Load model from directory."""
-        # Load weights
-        for key in self.weights:
-            weight_path = os.path.join(path, f"{key}.npy")
-            if os.path.exists(weight_path):
-                self.weights[key] = np.load(weight_path)
-        
-        # Load embeddings
-        emb_path = os.path.join(path, "user_embeddings.npy")
-        if os.path.exists(emb_path):
-            self.user_embeddings = np.load(emb_path)
-        
-        # Load metadata
-        meta_path = os.path.join(path, "metadata.json")
-        if os.path.exists(meta_path):
-            with open(meta_path, "r") as f:
-                metadata = json.load(f)
-            self.user_id_map = metadata.get("user_id_map", {})
-            self.next_user_idx = metadata.get("next_user_idx", 0)
-            self.is_trained = metadata.get("is_trained", False)
-        
-        print(f"Model loaded from {path}")
-        return self
 
 
+# Demo
 if __name__ == "__main__":
-    # Demo model
-    model = RasedLSTMModel(input_dim=36)
+    model = RasedLSTM()
     
-    # Create dummy sequence
-    sequence = np.random.randn(10, 36)
+    # مثال: سلوك طبيعي
+    normal_events = [
+        {"action": "open_app", "time_delta": 0, "duration": 1},
+        {"action": "login", "time_delta": 2, "duration": 5},
+        {"action": "browse_home", "time_delta": 3, "duration": 10},
+        {"action": "search", "time_delta": 5, "duration": 3},
+        {"action": "view_product", "time_delta": 2, "duration": 30},
+    ]
     
-    # Make prediction
-    prediction = model.predict(sequence, "test_user", actual_action="view_dashboard")
+    result = model.predict(normal_events, actual_action="add_to_cart")
+    print("=== سلوك طبيعي ===")
+    print(f"التنبؤ: {result.predicted_action}")
+    print(f"الثقة: {result.confidence:.1%}")
+    print(f"درجة الشذوذ: {result.anomaly_score:.2f}")
+    print(f"شاذ؟ {result.is_anomaly}")
     
-    print(f"Predicted action: {prediction.predicted_action}")
-    print(f"Confidence: {prediction.prediction_confidence:.2%}")
-    print(f"Anomaly score: {prediction.anomaly_score:.2%}")
+    # مثال: سلوك بوت (سريع جداً)
+    bot_events = [
+        {"action": "open_app", "time_delta": 0, "duration": 0.1},
+        {"action": "login", "time_delta": 0.1, "duration": 0.1},
+        {"action": "checkout", "time_delta": 0.1, "duration": 0.1},
+    ]
+    
+    result = model.predict(bot_events)
+    print("\n=== سلوك بوت ===")
+    print(f"درجة الشذوذ: {result.anomaly_score:.2f}")
+    print(f"شاذ؟ {result.is_anomaly}")
+    print(f"السبب: {result.reason}")

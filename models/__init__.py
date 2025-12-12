@@ -1,5 +1,4 @@
-"""Rased models module."""
-from .lstm_model import RasedLSTMModel
-from .digital_twin import DigitalTwinManager
+# Models package
+from .lstm_model import RasedLSTM, PredictionResult
 
-__all__ = ['RasedLSTMModel', 'DigitalTwinManager']
+__all__ = ['RasedLSTM', 'PredictionResult']
